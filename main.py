@@ -1,6 +1,7 @@
 import random
 import numpy as np
-from deap import creator, base, tools
+import deap.tools.emo as emo
+from deap import creator, base, tools, algorithms
 from quantum_simulation import run_circuit_on_simulator, run_circuit_on_statevector_simulator, deutsch_jozsa_oracle_balanced, deutsch_jozsa_oracle_balanced_inverse, deutsch_jozsa_oracle_const_0, deutsch_jozsa_oracle_const_1
 
 gate_set = ["h", "x", "cx", "rx", "ry", "rz", "oracle"]
@@ -8,9 +9,13 @@ gate_set = ["h", "x", "cx", "rx", "ry", "rz", "oracle"]
 num_qubits = 3
 min_individual_length = 3
 max_individual_length = 15
+use_multi_objective = True
 
 # Create an individual class to hold a list of gates
-creator.create("minErrorFitness", base.Fitness, weights=(-1.0,))  
+if(use_multi_objective):
+    creator.create("minErrorFitness", base.Fitness, weights=(-1.0, -1.0))  # Minimize error, minimize number of gates
+else:
+    creator.create("minErrorFitness", base.Fitness, weights=(-1.0,))  
 creator.create("Individual", list, fitness=creator.minErrorFitness)
 
 def create_individual():
@@ -126,8 +131,16 @@ def calculate_fitness_correctness_error(individual, simulation_results, correct_
     correctness /= 1024 * len(simulation_results)
     return 1 - correctness,
 
+def calculate_fitness_correctness_error_and_size(individual, simulation_results, correct_states):
+    correctness = 0
+    for counts, correct_states_per_case in zip(simulation_results, correct_states):
+        for state in correct_states_per_case:
+            correctness += counts.get(state, 0)
+    correctness /= 1024 * len(simulation_results)
+    return 1 - correctness, len(individual) 
+
 toolbox = base.Toolbox()
-toolbox.register("calculate_fitness", calculate_fitness_spector_1998)
+toolbox.register("calculate_fitness", calculate_fitness_correctness_error_and_size)
 
 def evaluate_deutsch_josza_1_input_qubits(individual):
     counts_balanced = run_circuit_on_simulator(individual, 2, 2)
@@ -162,61 +175,71 @@ param_pb = 0.25
 
 toolbox.register("mutate", mutate_individual, mut_pb=mut_pb, add_pb=add_pb,
                  del_pb=del_pb, change_pb=change_pb, param_pb=param_pb)
-toolbox.register("select", tools.selRoulette)
+toolbox.register("select", tools.selNSGA2)
 toolbox.register("evaluate", evaluate_deutsch_josza_2_input_qubits)
 
-pop_size = 1000
-num_generations = 30
-best_ind = None
+pop_size = 100
+num_generations = 10
 
-pop = toolbox.population(n=pop_size)
+def run_gp():
+    best_ind = None
+    pop = toolbox.population(n=pop_size)
 
-fitnesses = list(map(toolbox.evaluate, pop))
-for ind, fit in zip(pop, fitnesses):
-    ind.fitness.values = fit
+    fitnesses = list(map(toolbox.evaluate, pop))
+    for ind, fit in zip(pop, fitnesses):
+        ind.fitness.values = fit
 
-for g in range(num_generations):
-    print(f"-- Generation {g} --")
+    for g in range(num_generations):
+        print(f"-- Generation {g} --")
 
-    offspring = toolbox.select(pop, len(pop))
-    offspring = list(map(toolbox.clone, offspring))
+        offspring = toolbox.select(pop, len(pop))
+        offspring = list(map(toolbox.clone, offspring))
 
-    for child1, child2 in zip(offspring[::2], offspring[1::2]):
-            toolbox.mate(child1, child2)
-            del child1.fitness.values
-            del child2.fitness.values
+        for child1, child2 in zip(offspring[::2], offspring[1::2]):
+                toolbox.mate(child1, child2)
+                del child1.fitness.values
+                del child2.fitness.values
 
-    for mutant in offspring:
-            toolbox.mutate(mutant)
-            del mutant.fitness.values
+        for mutant in offspring:
+                toolbox.mutate(mutant)
+                del mutant.fitness.values
 
-    invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-    fitnesses = map(toolbox.evaluate, invalid_ind)
-    for ind, fit in zip(invalid_ind, fitnesses):
-        ind.fitness.values = fit 
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        fitnesses = map(toolbox.evaluate, invalid_ind)
+        for ind, fit in zip(invalid_ind, fitnesses):
+            ind.fitness.values = fit 
 
-    pop[:] = offspring
+        pop[:] = offspring
 
-    fits = [ind.fitness.values[0] for ind in pop]
-    print(f"  Min error: {min(fits)}")
-    print(f"  Max error: {max(fits)}")
-    print(f"  Avg error: {np.mean(fits)}")
-    print(f"  Std error: {np.std(fits)}")
+        # print fitness statistics
+        num_objectives = len(pop[0].fitness.values)
+        for i in range(num_objectives):
+            fits = [ind.fitness.values[i] for ind in pop]
+            print(f"  Min error of objective {i}: {min(fits)}")
+            print(f"  Max error of objective {i}: {max(fits)}")
+            print(f"  Avg error of objective {i}: {np.mean(fits)}")
     
-    curr_best_ind = tools.selBest(pop, 1)[0]
-    if best_ind is None or curr_best_ind.fitness.values[0] < best_ind.fitness.values[0]:
-        best_ind = curr_best_ind
+        # keep track of the best individual in single objective case
+        if num_objectives == 1:
+            curr_best_ind = tools.selBest(pop, 1)[0]
+            if best_ind is None or curr_best_ind.fitness.values[0] < best_ind.fitness.values[0]:
+                best_ind = curr_best_ind
 
-    if min(fits) <= 0.007:
-        break
-if(num_generations > 0):
-    print("Best individual:", best_ind)
-    print("Best individual's error:", best_ind.fitness.values[0])
-    print("best_ind spector_1998: ",toolbox.evaluate(best_ind))
-    toolbox.register("calculate_fitness", calculate_fitness_correctness_error)
-    print("best_ind correctness error: ",toolbox.evaluate(best_ind))
-known_solution=[['h', 0],['h', 1], ['x', 2], ['h', 2], ['oracle'], ['h', 0],['h', 1]]
-#known_solution=[['h', 0],['x', 1], ['h', 1], ['oracle'], ['h', 0]]
-print("known solution spector_1998: ",toolbox.evaluate(known_solution))
-toolbox.register("calculate_fitness", calculate_fitness_correctness_error)
-print("known solution correctness error: ",toolbox.evaluate(known_solution))
+    if num_objectives > 1:
+        selected_pop = tools.selNSGA2(pop, len(pop))
+        # Perform non-dominated sorting to extract the Pareto front
+        pareto_fronts = tools.sortNondominated(selected_pop, len(selected_pop))
+        best_ind = pareto_fronts[0] 
+    if(num_generations > 0):
+        print("Best individuals:", best_ind)
+        for ind_idx, ind in enumerate(best_ind):
+            for obj_idx ,obj_value in enumerate(ind.fitness.values):
+                print(f"Best individual {ind_idx + 1}, objective {obj_idx + 1}: {obj_value}")
+        
+        '''
+        print("best_ind spector_1998: ",toolbox.evaluate(best_ind))
+        toolbox.register("calculate_fitness", calculate_fitness_correctness_error)
+        print("best_ind correctness error: ",toolbox.evaluate(best_ind))
+        '''
+
+run_gp()
